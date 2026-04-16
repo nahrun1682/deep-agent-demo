@@ -1,0 +1,57 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_bash_log.sh\"",
+            "statusMessage": "Logging Bash command"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/pre_tool_use_block_dangerous.sh\"",
+            "statusMessage": "Checking dangerous Bash patterns"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/post_tool_use_dependency_audit.sh\"",
+            "timeout": 60,
+            "statusMessage": "Running dependency audit for pyproject changes"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/post_tool_use_notification_log.sh\"",
+            "statusMessage": "Logging hook notification"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/stop_python_format.sh\"",
+            "timeout": 60,
+            "statusMessage": "Formatting changed Python files"
+          },
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/stop_python_mypy.sh\"",
+            "timeout": 60,
+            "statusMessage": "Type-checking changed Python files"
+          }
+        ]
+      }
+    ]
+  }
+}
