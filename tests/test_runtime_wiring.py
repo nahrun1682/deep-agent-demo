@@ -83,8 +83,20 @@ def test_runtime_factory_wires_deep_agents_subagents_memory_mcp_and_hitl(monkeyp
     factory = DeepAgentsRuntimeFactory(settings=settings, auto_approve_memory=True)
 
     runtime = factory.build()
+    assert runtime.agent_factory is not None
 
-    assert runtime.agent is not None
+    built_agent = asyncio.run(
+        runtime.agent_factory(
+            ChatRequest(
+                message="hello",
+                thread_id="thread-a",
+                run_id="run-a",
+                user_id="user-a",
+            )
+        )
+    )
+
+    assert built_agent is not None
     assert captured["model"] == "openai:gpt-4.1"
     assert len(captured["subagents"]) == 3
     assert [item["name"] for item in captured["subagents"]] == [
@@ -94,6 +106,7 @@ def test_runtime_factory_wires_deep_agents_subagents_memory_mcp_and_hitl(monkeyp
     ]
     assert captured["skills"] == [str(Path(__file__).resolve().parents[1] / "skills" / "common")]
     assert captured["interrupt_on"]["promote_memory"] is True
+    assert str(captured["backend"].routes["/blackboard/"].__dict__["cwd"]).endswith("user-a/thread-a/run-a")
     assert captured["mcp_servers"] == {
         "local-demo": {
             "transport": "stdio",

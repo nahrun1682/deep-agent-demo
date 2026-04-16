@@ -1,5 +1,5 @@
 ---
-name: deep-agent-demo-common
+name: common
 description: Shared blackboard, memory, trace, and MCP conventions for the demo.
 ---
 

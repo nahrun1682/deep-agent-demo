@@ -8,7 +8,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
@@ -94,18 +94,25 @@ class DeepAgentsRuntimeFactory:
 
     def build(self) -> "DeepAgentsRuntime":
         load_demo_environment()
-        return asyncio.run(self._build_runtime(self.settings))
+        return DeepAgentsRuntime(
+            settings=self.settings,
+            auto_approve_memory=self.auto_approve_memory,
+            agent_factory=self._build_agent_for_request,
+        )
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[RuntimeEvent]:
-        runtime = await self._build_runtime(resolve_runtime_scope(self.settings, request))
+        runtime = self.build()
         async for event in runtime.stream(request):
             yield event
 
-    async def _build_runtime(self, scope: RuntimeScope | AppSettings) -> "DeepAgentsRuntime":
-        load_demo_environment()
-        settings = scope if isinstance(scope, AppSettings) else _scope_settings(self.settings, scope)
+    async def _build_agent_for_request(self, request: ChatRequest) -> Any:
+        scope = resolve_runtime_scope(self.settings, request)
+        return await self._build_agent(scope)
+
+    async def _build_agent(self, scope: RuntimeScope) -> Any:
+        settings = _scope_settings(self.settings, scope)
         mcp_tools = await self._load_mcp_tools()
-        agent = create_deep_agent(
+        return create_deep_agent(
             name="blackboard-orchestrator",
             model=self.model,
             system_prompt=_orchestrator_system_prompt(),
@@ -144,7 +151,6 @@ class DeepAgentsRuntimeFactory:
             interrupt_on={"promote_memory": True},
             response_format=OrchestratorOutput,
         )
-        return DeepAgentsRuntime(agent=agent, settings=settings, auto_approve_memory=self.auto_approve_memory)
 
     async def _load_mcp_tools(self) -> list[Any]:
         client = MultiServerMCPClient(
@@ -161,16 +167,23 @@ class DeepAgentsRuntimeFactory:
 
 @dataclass(slots=True)
 class DeepAgentsRuntime:
-    agent: Any
     settings: AppSettings
+    agent: Any | None = None
+    agent_factory: Callable[[ChatRequest], Awaitable[Any]] | None = None
     auto_approve_memory: bool = True
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[RuntimeEvent]:
+        agent = self.agent
+        if agent is None:
+            if self.agent_factory is None:
+                raise RuntimeError("DeepAgentsRuntime requires an agent or an agent_factory")
+            agent = await self.agent_factory(request)
+        scope = resolve_runtime_scope(self.settings, request)
         events: "queue.Queue[RuntimeEvent | Exception | object]" = queue.Queue()
         sentinel = object()
         worker = threading.Thread(
             target=self._run_stream,
-            args=(request, events, sentinel),
+            args=(request, scope, agent, events, sentinel),
             daemon=True,
         )
         worker.start()
@@ -186,28 +199,36 @@ class DeepAgentsRuntime:
     def _run_stream(
         self,
         request: ChatRequest,
+        scope: RuntimeScope,
+        agent: Any,
         events: "queue.Queue[RuntimeEvent | Exception | object]",
         sentinel: object,
     ) -> None:
         try:
-            self._emit_stream_events(request, events)
+            self._emit_stream_events(request, scope, agent, events)
         except Exception as exc:  # pragma: no cover - surfaced in async consumer
             events.put(exc)
         finally:
             events.put(sentinel)
 
-    def _emit_stream_events(self, request: ChatRequest, events: "queue.Queue[RuntimeEvent | Exception | object]") -> None:
+    def _emit_stream_events(
+        self,
+        request: ChatRequest,
+        scope: RuntimeScope,
+        agent: Any,
+        events: "queue.Queue[RuntimeEvent | Exception | object]",
+    ) -> None:
         events.put(RuntimeEvent.progress(actor="Orchestrator", message="Starting deep agent run", step="start"))
         base_snapshot = _seed_snapshot(request)
         final_snapshot = base_snapshot
         last_ai_content = ""
         interrupt_payload: dict[str, Any] | None = None
 
-        if not hasattr(self.agent, "stream"):
-            self._emit_legacy_events(request, events, base_snapshot)
+        if not hasattr(agent, "stream"):
+            self._emit_legacy_events(agent, request, scope, events, base_snapshot)
             return
 
-        for chunk in self.agent.stream(
+        for chunk in agent.stream(
             {"messages": [{"role": "user", "content": request.message}]},
             config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
             stream_mode=["updates", "messages"],
@@ -233,7 +254,7 @@ class DeepAgentsRuntime:
                         step=_step_name(updates),
                     )
                 )
-                events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
+                events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
                 continue
 
             token, metadata = chunk["data"]
@@ -250,7 +271,7 @@ class DeepAgentsRuntime:
                     )
                 )
                 if getattr(token, "name", "") in {"write_file", "edit_file", "promote_memory"}:
-                    events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
+                    events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
             elif getattr(token, "type", None) == "ai" and getattr(token, "content", ""):
                 last_ai_content = token.content
                 events.put(RuntimeEvent.progress(actor=actor, message=_truncate(token.content), step="message"))
@@ -265,27 +286,29 @@ class DeepAgentsRuntime:
                     message="Memory write auto-approved",
                 )
             )
-            resume_result = self.agent.invoke(
+            resume_result = agent.invoke(
                 Command(resume={"decisions": [{"type": "approve"} for _ in interrupt_payload["action_requests"]]}),
                 config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
                 version="v2",
             )
             output = _coerce_output(resume_result.value, fallback_snapshot=final_snapshot)
-            events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
+            events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
             events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
             return
 
         output = _coerce_output_from_text(last_ai_content, fallback_snapshot=base_snapshot)
-        events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
+        events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
         events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
 
     def _emit_legacy_events(
         self,
+        agent: Any,
         request: ChatRequest,
+        scope: RuntimeScope,
         events: "queue.Queue[RuntimeEvent | Exception | object]",
         base_snapshot: BlackboardSnapshot,
     ) -> None:
-        result = self.agent.invoke(
+        result = agent.invoke(
             {"messages": [{"role": "user", "content": request.message}]},
             config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
             version="v2",
@@ -307,7 +330,7 @@ class DeepAgentsRuntime:
                     message="Memory write auto-approved",
                 )
             )
-            result = self.agent.invoke(
+            result = agent.invoke(
                 Command(resume={"decisions": [{"type": "approve"} for _ in _interrupt_payload(result.interrupts)["action_requests"]]}),
                 config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
                 version="v2",

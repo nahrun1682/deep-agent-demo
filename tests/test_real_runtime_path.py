@@ -34,13 +34,20 @@ def test_real_openai_backed_runtime_path_with_local_mcp(tmp_path: Path) -> None:
     )
     app = create_app(runtime_factory=DeepAgentsRuntimeFactory(settings=settings, model="openai:gpt-4.1"))
 
-    async def run() -> str:
+    async def run() -> list[str]:
+        events: list[str] = []
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post("/chat", json=request.model_dump())
-        assert response.status_code == 200
-        return response.text
+            async with client.stream("POST", "/chat", json=request.model_dump()) as response:
+                assert response.status_code == 200
+                async for line in response.aiter_lines():
+                    if line.startswith("event: "):
+                        events.append(line.removeprefix("event: "))
+                        if line == "event: final":
+                            break
+        return events
 
-    response_text = asyncio.run(run())
-    assert "event: progress" in response_text
-    assert "event: final" in response_text
+    event_names = asyncio.run(run())
+    assert event_names[0] == "progress"
+    assert "blackboard" in event_names
+    assert event_names[-1] == "final"
     assert resolve_runtime_scope(app.state.settings, request).blackboard_root.joinpath("goal.md").exists()

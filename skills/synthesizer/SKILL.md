@@ -1,5 +1,5 @@
 ---
-name: deep-agent-demo-synthesizer
+name: synthesizer
 description: Synthesis skill for merging a plan and critique into one strategy.
 ---
 

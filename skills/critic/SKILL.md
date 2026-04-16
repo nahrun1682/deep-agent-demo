@@ -1,5 +1,5 @@
 ---
-name: deep-agent-demo-critic
+name: critic
 description: Critique skill for finding risks and missing assumptions.
 ---
 

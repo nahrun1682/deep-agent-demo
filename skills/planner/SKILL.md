@@ -1,5 +1,5 @@
 ---
-name: deep-agent-demo-planner
+name: planner
 description: Planning skill for decomposing blackboard-pattern tasks.
 ---
 

@@ -23,7 +23,7 @@ def create_app(
     settings.memory_root.mkdir(parents=True, exist_ok=True)
 
     if runtime is None:
-        runtime = runtime_factory or DeepAgentsRuntimeFactory(settings=settings)
+        runtime = (runtime_factory or DeepAgentsRuntimeFactory(settings=settings)).build()
 
     service = ChatService(settings=settings, runtime=runtime)  # type: ignore[arg-type]
     app = FastAPI(title="Deep Agents Blackboard Demo")
