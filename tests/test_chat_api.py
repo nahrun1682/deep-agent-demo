@@ -172,7 +172,7 @@ async def test_chat_endpoint_streams_sse_and_writes_blackboard(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_preserves_existing_blackboard_files(tmp_path: Path) -> None:
+async def test_chat_endpoint_resets_existing_blackboard_files(tmp_path: Path) -> None:
     blackboard_root = tmp_path / "blackboard"
     blackboard_root.mkdir(parents=True, exist_ok=True)
     existing_plan = blackboard_root / "plan.md"
@@ -197,10 +197,11 @@ async def test_chat_endpoint_preserves_existing_blackboard_files(tmp_path: Path)
                 "message": "Study the blackboard pattern",
                 "auto_approve_memory": True,
             },
-        )
+    )
 
     assert response.status_code == 200
-    assert existing_plan.read_text(encoding="utf-8") == "runtime-owned plan"
+    assert existing_plan.read_text(encoding="utf-8") != "runtime-owned plan"
+    assert "No plan has been recorded yet." in existing_plan.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,7 @@ class RuntimeEvent(BaseModel):
     state: str | None = None
     action: str | None = None
     snapshot: BlackboardSnapshot | None = None
+    artifacts: dict[str, str] | None = None
     final_answer: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
 
@@ -49,8 +50,13 @@ class RuntimeEvent(BaseModel):
         return cls(type="progress", actor=actor, message=message, step=step)
 
     @classmethod
-    def blackboard(cls, *, snapshot: BlackboardSnapshot) -> "RuntimeEvent":
-        return cls(type="blackboard", snapshot=snapshot)
+    def blackboard(
+        cls,
+        *,
+        snapshot: BlackboardSnapshot | None = None,
+        artifacts: dict[str, str] | None = None,
+    ) -> "RuntimeEvent":
+        return cls(type="blackboard", snapshot=snapshot, artifacts=artifacts)
 
     @classmethod
     def hitl(cls, *, action: str, state: str, message: str) -> "RuntimeEvent":
@@ -203,6 +209,7 @@ class DeepAgentsRuntime:
                         step=_step_name(updates),
                     )
                 )
+                events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
                 continue
 
             token, metadata = chunk["data"]
@@ -219,7 +226,7 @@ class DeepAgentsRuntime:
                     )
                 )
                 if getattr(token, "name", "") in {"write_file", "edit_file", "promote_memory"}:
-                    events.put(RuntimeEvent.blackboard(snapshot=final_snapshot))
+                    events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
             elif getattr(token, "type", None) == "ai" and getattr(token, "content", ""):
                 last_ai_content = token.content
                 events.put(RuntimeEvent.progress(actor=actor, message=_truncate(token.content), step="message"))
@@ -240,12 +247,12 @@ class DeepAgentsRuntime:
                 version="v2",
             )
             output = _coerce_output(resume_result.value, fallback_snapshot=final_snapshot)
-            events.put(RuntimeEvent.blackboard(snapshot=output.snapshot))
+            events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
             events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
             return
 
         output = _coerce_output_from_text(last_ai_content, fallback_snapshot=base_snapshot)
-        events.put(RuntimeEvent.blackboard(snapshot=output.snapshot))
+        events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(self.settings.blackboard_root)))
         events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
 
     def _emit_legacy_events(
@@ -472,6 +479,26 @@ def _truncate(text: str, limit: int = 160) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 1] + "…"
+
+
+def _read_blackboard_artifacts(root: Path) -> dict[str, str]:
+    artifacts: dict[str, str] = {}
+    for relative_path in (
+        "goal.md",
+        "plan.md",
+        "critique.md",
+        "synthesis.md",
+        "trace.md",
+        "memory-proposals.md",
+        "mcp-log.md",
+        "state-summary.md",
+        "decisions.md",
+        "open-questions.md",
+    ):
+        path = root / relative_path
+        if path.exists():
+            artifacts[relative_path] = path.read_text(encoding="utf-8")
+    return artifacts
 
 
 def _orchestrator_system_prompt() -> str:

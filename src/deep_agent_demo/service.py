@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol
 
@@ -23,13 +24,13 @@ class BlackboardProjector:
     settings: AppSettings
     planner: BlackboardWritePlanner = field(default_factory=BlackboardWritePlanner)
 
-    def seed_missing(self, snapshot: BlackboardSnapshot) -> None:
+    def reset_run(self, snapshot: BlackboardSnapshot) -> None:
+        if self.settings.blackboard_root.exists():
+            shutil.rmtree(self.settings.blackboard_root)
         self.settings.blackboard_root.mkdir(parents=True, exist_ok=True)
         artifacts = render_blackboard_artifacts(snapshot)
         for relative_path, content in artifacts.items():
             path = self.settings.blackboard_root / relative_path
-            if path.exists():
-                continue
             plan = self.planner.plan(path, content, exists=False)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(plan.content, encoding="utf-8")
@@ -50,7 +51,7 @@ class ChatService:
                 ],
             )
         )
-        self._projector.seed_missing(initial_snapshot)
+        self._projector.reset_run(initial_snapshot)
         yield _sse_event(
             "progress",
             {
@@ -59,10 +60,18 @@ class ChatService:
                 "message": "Goal initialized",
             },
         )
-        yield _sse_event("blackboard", {"snapshot": initial_snapshot.model_dump(mode="json")})
+        yield _sse_event("blackboard", {"artifacts": self._read_artifacts()})
 
         async for event in self._runtime.stream(request):
             yield _sse_event(event.type, event.model_dump(mode="json"))
+
+    def _read_artifacts(self) -> dict[str, str]:
+        artifacts: dict[str, str] = {}
+        for relative_path in render_blackboard_artifacts(BlackboardSnapshot()).keys():
+            path = self._settings.blackboard_root / relative_path
+            if path.exists():
+                artifacts[relative_path] = path.read_text(encoding="utf-8")
+        return artifacts
 
 
 def _sse_event(name: str, payload: dict[str, object]) -> str:
