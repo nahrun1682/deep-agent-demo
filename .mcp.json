@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "docker": {
+      "command": "uvx",
+      "args": ["mcp-server-docker"],
+      "env": {}
+    },
+    "jupyter": {
+      "command": "uvx",
+      "args": ["mcp-server-jupyter"],
+      "env": {}
+    },
+    "opik": {
+      "command": "npx",
+      "args": ["-y", "opik-mcp"],
+      "env": {}
+    },
+    "memory-bank": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {}
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "env": {}
+    },
+    "deep-graph": {
+      "command": "npx",
+      "args": ["-y", "mcp-code-graph"],
+      "env": {}
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"],
+      "env": {}
+    }
+  }
+}
