@@ -5,8 +5,17 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "anyio>=4.13.0",
+    "deepagents>=0.5.3",
+    "fastapi>=0.136.0",
+    "httpx>=0.28.1",
+    "langchain-mcp-adapters>=0.2.2",
+    "langchain-openai>=1.1.14",
+    "mcp>=1.27.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
+    "python-dotenv>=1.2.2",
+    "uvicorn>=0.44.0",
 ]
 
 [dependency-groups]
