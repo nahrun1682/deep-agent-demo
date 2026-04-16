@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 import pytest
 
@@ -19,7 +20,72 @@ from deep_agent_demo.blackboard import (
     StateSummary,
     TraceEntry,
     render_blackboard_artifacts,
+    render_goal_markdown,
+    render_plan_markdown,
 )
+
+
+def test_render_goal_and_plan_markdown_preserve_shape_for_multiline_content() -> None:
+    goal = GoalDocument(
+        request="Build a blackboard demo\n- keep it readable",
+        success_criteria=["show files\nwith stable structure", "use typed models"],
+        constraints=["no FastAPI\nno Deep Agents orchestration"],
+        context_notes=["markdown-ish content:\n# heading\n- bullet"],
+    )
+    plan = PlanDocument(
+        overview="Turn the request into a typed study demo.\nKeep the output observable.",
+        steps=[
+            PlanStep(order=2, title="render markdown", detail="produce artifacts\nfor humans"),
+            PlanStep(order=1, title="model the domain", detail="add typed models"),
+        ],
+        assumptions=["python 3.11\nportable local checkout"],
+        dependencies=["pytest\nfor the test suite"],
+    )
+
+    assert render_goal_markdown(goal).splitlines() == [
+        "# Goal",
+        "",
+        "## User Request",
+        "Build a blackboard demo",
+        "  - keep it readable",
+        "",
+        "## Success Criteria",
+        "- show files",
+        "  with stable structure",
+        "- use typed models",
+        "",
+        "## Constraints",
+        "- no FastAPI",
+        "  no Deep Agents orchestration",
+        "",
+        "## Context Notes",
+        "- markdown-ish content:",
+        "  # heading",
+        "  - bullet",
+    ]
+
+    assert render_plan_markdown(plan).splitlines() == [
+        "# Plan",
+        "",
+        "## Overview",
+        "Turn the request into a typed study demo.",
+        "  Keep the output observable.",
+        "",
+        "## Steps",
+        "1. model the domain",
+        "   add typed models",
+        "2. render markdown",
+        "   produce artifacts",
+        "   for humans",
+        "",
+        "## Assumptions",
+        "- python 3.11",
+        "  portable local checkout",
+        "",
+        "## Dependencies",
+        "- pytest",
+        "  for the test suite",
+    ]
 
 
 def test_render_blackboard_artifacts_from_structured_snapshot() -> None:
@@ -101,7 +167,7 @@ def test_render_blackboard_artifacts_from_structured_snapshot() -> None:
 
     artifacts = render_blackboard_artifacts(snapshot)
 
-    assert set(artifacts) == {
+    assert list(artifacts) == [
         "goal.md",
         "plan.md",
         "critique.md",
@@ -112,17 +178,26 @@ def test_render_blackboard_artifacts_from_structured_snapshot() -> None:
         "state-summary.md",
         "decisions.md",
         "open-questions.md",
-    }
-    assert "Build a blackboard demo" in artifacts["goal.md"]
-    assert "1. model the domain" in artifacts["plan.md"]
-    assert "markdown projection can drift" in artifacts["critique.md"]
-    assert "use structured output internally" in artifacts["synthesis.md"]
-    assert "Orchestrator" in artifacts["trace.md"]
-    assert "Keep the blackboard model separate" in artifacts["memory-proposals.md"]
-    assert "docs" in artifacts["mcp-log.md"]
-    assert "Demo foundation drafted" in artifacts["state-summary.md"]
-    assert "Use structured output as the canonical state." in artifacts["decisions.md"]
-    assert "Should future subagents write directly to memory?" in artifacts["open-questions.md"]
+    ]
+    assert artifacts["goal.md"].splitlines()[:5] == [
+        "# Goal",
+        "",
+        "## User Request",
+        "Build a blackboard demo",
+        "",
+    ]
+    assert artifacts["plan.md"].splitlines()[:8] == [
+        "# Plan",
+        "",
+        "## Overview",
+        "Turn the request into a typed study demo.",
+        "",
+        "## Steps",
+        "1. model the domain",
+        "   add typed models",
+    ]
+    assert artifacts["trace.md"].splitlines()[3] == "- action: initialized blackboard snapshot"
+    assert artifacts["state-summary.md"].splitlines()[2] == "## Demo foundation drafted"
 
 
 def test_blackboard_write_planner_uses_write_then_edit() -> None:
@@ -137,8 +212,29 @@ def test_blackboard_write_planner_uses_write_then_edit() -> None:
     assert update.path == Path("plan.md")
 
 
-def test_settings_derives_blackboard_and_memory_roots() -> None:
-    settings = AppSettings(workspace_root=Path("/tmp/demo"))
+def test_app_settings_defaults_are_portable_and_derivable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
 
-    assert settings.blackboard_root == Path("/tmp/demo/blackboard")
+    settings = AppSettings()
+
+    assert settings.workspace_root == tmp_path
+    assert settings.blackboard_root == tmp_path / "blackboard"
+    assert settings.memory_root == tmp_path / "memories"
+
+
+def test_app_settings_can_still_target_workspace_style_paths() -> None:
+    settings = AppSettings(workspace_root=Path("/workspace"), memory_root=Path("/memories"))
+
+    assert settings.blackboard_root == Path("/workspace/blackboard")
     assert settings.memory_root == Path("/memories")
+
+
+def test_pyproject_uses_dependency_group_for_test_dependencies() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+
+    assert "pytest" not in pyproject["project"]["dependencies"]
+    assert "pytest-asyncio" not in pyproject["project"]["dependencies"]
+    assert pyproject["dependency-groups"]["test"] == [
+        "pytest>=9.0.3",
+        "pytest-asyncio>=1.3.0",
+    ]

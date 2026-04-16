@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from deep_agent_demo.blackboard.models import (
     BlackboardSnapshot,
     CritiqueDocument,
@@ -24,10 +22,12 @@ def render_goal_markdown(goal: GoalDocument | None) -> str:
         lines.append("No goal has been recorded yet.")
         return "\n".join(lines)
 
-    lines.extend(["", "## User Request", goal.request])
-    _extend_bullets(lines, "Success Criteria", goal.success_criteria)
-    _extend_bullets(lines, "Constraints", goal.constraints)
-    _extend_bullets(lines, "Context Notes", goal.context_notes)
+    lines.append("")
+    lines.append("## User Request")
+    _append_text_block(lines, goal.request)
+    _append_bullets(lines, "Success Criteria", goal.success_criteria)
+    _append_bullets(lines, "Constraints", goal.constraints)
+    _append_bullets(lines, "Context Notes", goal.context_notes)
     return "\n".join(lines)
 
 
@@ -38,14 +38,16 @@ def render_plan_markdown(plan: PlanDocument | None) -> str:
         lines.append("No plan has been recorded yet.")
         return "\n".join(lines)
 
-    lines.extend(["", "## Overview", plan.overview])
+    lines.append("")
+    lines.append("## Overview")
+    _append_text_block(lines, plan.overview)
     if plan.steps:
         lines.extend(["", "## Steps"])
         for step in sorted(plan.steps, key=lambda item: item.order):
             lines.append(f"{step.order}. {step.title}")
-            lines.append(f"   {step.detail}")
-    _extend_bullets(lines, "Assumptions", plan.assumptions)
-    _extend_bullets(lines, "Dependencies", plan.dependencies)
+            _append_text_block(lines, step.detail, indent="   ", indent_first=True)
+    _append_bullets(lines, "Assumptions", plan.assumptions)
+    _append_bullets(lines, "Dependencies", plan.dependencies)
     return "\n".join(lines)
 
 
@@ -56,9 +58,9 @@ def render_critique_markdown(critique: CritiqueDocument | None) -> str:
         lines.append("No critique has been recorded yet.")
         return "\n".join(lines)
 
-    _extend_bullets(lines, "Risks", critique.risks)
-    _extend_bullets(lines, "Improvements", critique.improvements)
-    _extend_bullets(lines, "Questions", critique.questions)
+    _append_bullets(lines, "Risks", critique.risks)
+    _append_bullets(lines, "Improvements", critique.improvements)
+    _append_bullets(lines, "Questions", critique.questions)
     return "\n".join(lines)
 
 
@@ -69,9 +71,11 @@ def render_synthesis_markdown(synthesis: SynthesisDocument | None) -> str:
         lines.append("No synthesis has been recorded yet.")
         return "\n".join(lines)
 
-    lines.extend(["", "## Recommended Direction", synthesis.recommended_direction])
-    _extend_bullets(lines, "Tradeoffs", synthesis.tradeoffs)
-    _extend_bullets(lines, "Unresolved Items", synthesis.unresolved_items)
+    lines.append("")
+    lines.append("## Recommended Direction")
+    _append_text_block(lines, synthesis.recommended_direction)
+    _append_bullets(lines, "Tradeoffs", synthesis.tradeoffs)
+    _append_bullets(lines, "Unresolved Items", synthesis.unresolved_items)
     return "\n".join(lines)
 
 
@@ -82,17 +86,18 @@ def render_trace_markdown(entries: list[TraceEntry]) -> str:
         return "\n".join(lines)
 
     for entry in entries:
-        lines.extend(["", f"## {entry.actor}", f"- action: {entry.action}"])
+        lines.extend(["", f"## {entry.actor}"])
+        _append_field(lines, "action", entry.action)
         if entry.timestamp is not None:
-            lines.append(f"- timestamp: {entry.timestamp.isoformat()}")
+            _append_field(lines, "timestamp", entry.timestamp.isoformat())
         if entry.target:
-            lines.append(f"- target: {entry.target}")
+            _append_field(lines, "target", entry.target)
         if entry.reason:
-            lines.append(f"- reason: {entry.reason}")
+            _append_field(lines, "reason", entry.reason)
         if entry.result:
-            lines.append(f"- result: {entry.result}")
+            _append_field(lines, "result", entry.result)
         if entry.next_step:
-            lines.append(f"- next: {entry.next_step}")
+            _append_field(lines, "next", entry.next_step)
     return "\n".join(lines)
 
 
@@ -107,12 +112,12 @@ def render_memory_proposals_markdown(proposals: list[MemoryProposal]) -> str:
             [
                 "",
                 f"## {proposal.source_actor}",
-                f"- summary: {proposal.summary}",
-                f"- rationale: {proposal.rationale}",
             ]
         )
+        _append_field(lines, "summary", proposal.summary)
+        _append_field(lines, "rationale", proposal.rationale)
         if proposal.persistence_hint:
-            lines.append(f"- persistence hint: {proposal.persistence_hint}")
+            _append_field(lines, "persistence hint", proposal.persistence_hint)
     return "\n".join(lines)
 
 
@@ -127,14 +132,14 @@ def render_mcp_log_markdown(records: list[McpUsageRecord]) -> str:
             [
                 "",
                 f"## {record.actor}",
-                f"- server: {record.server}",
-                f"- tool: {record.tool_name}",
-                f"- reason: {record.reason}",
-                f"- summary: {record.summary}",
             ]
         )
+        _append_field(lines, "server", record.server)
+        _append_field(lines, "tool", record.tool_name)
+        _append_field(lines, "reason", record.reason)
+        _append_field(lines, "summary", record.summary)
         if record.outcome:
-            lines.append(f"- outcome: {record.outcome}")
+            _append_field(lines, "outcome", record.outcome)
     return "\n".join(lines)
 
 
@@ -148,12 +153,12 @@ def render_state_summary_markdown(summary: StateSummary | None) -> str:
         [
             "",
             f"## {summary.headline}",
-            f"- status: {summary.status}",
-            f"- current focus: {summary.current_focus}",
         ]
     )
-    _extend_bullets(lines, "Completed", summary.completed)
-    _extend_bullets(lines, "Next Actions", summary.next_actions)
+    _append_field(lines, "status", summary.status)
+    _append_field(lines, "current focus", summary.current_focus)
+    _append_bullets(lines, "Completed", summary.completed)
+    _append_bullets(lines, "Next Actions", summary.next_actions)
     return "\n".join(lines)
 
 
@@ -168,11 +173,11 @@ def render_decisions_markdown(decisions: list[DecisionEntry]) -> str:
             [
                 "",
                 f"## {decision.actor}",
-                f"- summary: {decision.summary}",
-                f"- rationale: {decision.rationale}",
-                f"- outcome: {decision.outcome}",
             ]
         )
+        _append_field(lines, "summary", decision.summary)
+        _append_field(lines, "rationale", decision.rationale)
+        _append_field(lines, "outcome", decision.outcome)
     return "\n".join(lines)
 
 
@@ -187,10 +192,10 @@ def render_open_questions_markdown(questions: list[OpenQuestion]) -> str:
             [
                 "",
                 f"## {question.owner}",
-                f"- question: {question.question}",
-                f"- severity: {question.severity}",
             ]
         )
+        _append_field(lines, "question", question.question)
+        _append_field(lines, "severity", question.severity)
     return "\n".join(lines)
 
 
@@ -209,8 +214,39 @@ def render_blackboard_artifacts(snapshot: BlackboardSnapshot) -> dict[str, str]:
     }
 
 
-def _extend_bullets(lines: list[str], heading: str, values: list[str]) -> None:
+def _append_text_block(lines: list[str], text: str, *, indent: str = "  ", indent_first: bool = False) -> None:
+    normalized_lines = _normalize_lines(text)
+    if not normalized_lines:
+        lines.append("")
+        return
+    if indent_first:
+        lines.append(f"{indent}{normalized_lines[0]}")
+    else:
+        lines.append(normalized_lines[0])
+    lines.extend(f"{indent}{line}" for line in normalized_lines[1:])
+
+
+def _append_field(lines: list[str], label: str, value: str) -> None:
+    normalized_lines = _normalize_lines(value)
+    if not normalized_lines:
+        lines.append(f"- {label}:")
+        return
+    lines.append(f"- {label}: {normalized_lines[0]}")
+    lines.extend(f"  {line}" for line in normalized_lines[1:])
+
+
+def _append_bullets(lines: list[str], heading: str, values: list[str]) -> None:
     if not values:
         return
     lines.extend(["", f"## {heading}"])
-    lines.extend(f"- {value}" for value in values)
+    for value in values:
+        normalized_lines = _normalize_lines(value)
+        if not normalized_lines:
+            lines.append("-")
+            continue
+        lines.append(f"- {normalized_lines[0]}")
+        lines.extend(f"  {line}" for line in normalized_lines[1:])
+
+
+def _normalize_lines(text: str) -> list[str]:
+    return [line.rstrip() for line in text.splitlines()]
