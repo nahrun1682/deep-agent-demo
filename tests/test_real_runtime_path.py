@@ -5,9 +5,11 @@ import os
 from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from deep_agent_demo.app import create_app
 from deep_agent_demo.blackboard import AppSettings
-from deep_agent_demo.runtime import ChatRequest, DeepAgentsRuntimeFactory
+from deep_agent_demo.runtime import ChatRequest, DeepAgentsRuntimeFactory, resolve_runtime_scope
 
 
 pytestmark = pytest.mark.skipif(
@@ -23,20 +25,22 @@ def test_real_openai_backed_runtime_path_with_local_mcp(tmp_path: Path) -> None:
         blackboard_root=tmp_path / "blackboard",
         memory_root=tmp_path / "memories",
     )
-    runtime = DeepAgentsRuntimeFactory(settings=settings, model="openai:gpt-4.1").build()
+    request = ChatRequest(
+        message="Give a one-sentence summary of the blackboard pattern.",
+        auto_approve_memory=True,
+        thread_id="real-thread",
+        run_id="real-run",
+        user_id="local-user",
+    )
+    app = create_app(runtime_factory=DeepAgentsRuntimeFactory(settings=settings, model="openai:gpt-4.1"))
 
-    async def run() -> list[str]:
-        events = [
-            event
-            async for event in runtime.stream(
-                ChatRequest(message="Give a one-sentence summary of the blackboard pattern.", auto_approve_memory=True)
-            )
-        ]
-        assert events
-        assert events[-1].type == "final"
-        return [event.type for event in events]
+    async def run() -> str:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/chat", json=request.model_dump())
+        assert response.status_code == 200
+        return response.text
 
-    event_types = asyncio.run(run())
-    assert "progress" in event_types
-    assert "final" in event_types
-    assert (tmp_path / "blackboard" / "goal.md").exists()
+    response_text = asyncio.run(run())
+    assert "event: progress" in response_text
+    assert "event: final" in response_text
+    assert resolve_runtime_scope(app.state.settings, request).blackboard_root.joinpath("goal.md").exists()

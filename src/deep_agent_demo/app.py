@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
 from deep_agent_demo.blackboard import AppSettings
-from deep_agent_demo.runtime import ChatRequest, DeepAgentsRuntimeFactory
+from deep_agent_demo.runtime import ChatRequest, DeepAgentsRuntimeFactory, load_demo_environment
 from deep_agent_demo.service import ChatService
 
 
@@ -17,13 +17,13 @@ def create_app(
     runtime: object | None = None,
     runtime_factory: DeepAgentsRuntimeFactory | None = None,
 ) -> FastAPI:
+    load_demo_environment()
     settings = AppSettings(**(settings_overrides or {}))
     settings.blackboard_root.mkdir(parents=True, exist_ok=True)
     settings.memory_root.mkdir(parents=True, exist_ok=True)
 
     if runtime is None:
-        factory = runtime_factory or DeepAgentsRuntimeFactory(settings=settings)
-        runtime = factory.build()
+        runtime = runtime_factory or DeepAgentsRuntimeFactory(settings=settings)
 
     service = ChatService(settings=settings, runtime=runtime)  # type: ignore[arg-type]
     app = FastAPI(title="Deep Agents Blackboard Demo")
@@ -54,4 +54,3 @@ def main() -> None:
         port=8000,
         reload=False,
     )
-

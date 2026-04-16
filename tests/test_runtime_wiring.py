@@ -15,6 +15,7 @@ from deep_agent_demo.runtime import (
     DeepAgentsRuntimeFactory,
     OrchestratorOutput,
     candidate_env_files,
+    resolve_memory_target,
 )
 
 
@@ -100,6 +101,23 @@ def test_runtime_factory_wires_deep_agents_subagents_memory_mcp_and_hitl(monkeyp
             "args": ["-m", "deep_agent_demo.mcp_server"],
         }
     }
+
+
+def test_promote_memory_target_rejects_path_traversal(tmp_path: Path) -> None:
+    settings = AppSettings(
+        workspace_root=tmp_path,
+        blackboard_root=tmp_path / "blackboard",
+        memory_root=tmp_path / "memories",
+    )
+
+    assert resolve_memory_target(settings, "/memories/study.md") == tmp_path / "memories" / "study.md"
+    assert resolve_memory_target(settings, "memories/nested/note.md") == tmp_path / "memories" / "nested" / "note.md"
+
+    with pytest.raises(ValueError):
+        resolve_memory_target(settings, "../escape.md")
+
+    with pytest.raises(ValueError):
+        resolve_memory_target(settings, "/tmp/escape.md")
 
 
 def test_candidate_env_files_include_repo_and_codex_envs() -> None:

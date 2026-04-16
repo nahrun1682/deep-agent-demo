@@ -30,7 +30,21 @@ class ChatRequest(BaseModel):
     message: str
     auto_approve_memory: bool = True
     thread_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str = "local-user"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeScope:
+    user_id: str
+    thread_id: str
+    run_id: str
+    blackboard_root: Path
+    memory_root: Path
+
+    @property
+    def checkpoint_thread_id(self) -> str:
+        return f"{self.user_id}:{self.thread_id}:{self.run_id}"
 
 
 class RuntimeEvent(BaseModel):
@@ -80,12 +94,22 @@ class DeepAgentsRuntimeFactory:
 
     def build(self) -> "DeepAgentsRuntime":
         load_demo_environment()
-        mcp_tools = asyncio.run(self._load_mcp_tools())
+        return asyncio.run(self._build_runtime(self.settings))
+
+    async def stream(self, request: ChatRequest) -> AsyncIterator[RuntimeEvent]:
+        runtime = await self._build_runtime(resolve_runtime_scope(self.settings, request))
+        async for event in runtime.stream(request):
+            yield event
+
+    async def _build_runtime(self, scope: RuntimeScope | AppSettings) -> "DeepAgentsRuntime":
+        load_demo_environment()
+        settings = scope if isinstance(scope, AppSettings) else _scope_settings(self.settings, scope)
+        mcp_tools = await self._load_mcp_tools()
         agent = create_deep_agent(
             name="blackboard-orchestrator",
             model=self.model,
             system_prompt=_orchestrator_system_prompt(),
-            tools=[_build_promote_memory_tool(self.settings), *mcp_tools],
+            tools=[_build_promote_memory_tool(settings), *mcp_tools],
             subagents=[
                 _build_subagent_config(
                     name="planner",
@@ -93,7 +117,7 @@ class DeepAgentsRuntimeFactory:
                     system_prompt=_planner_system_prompt(),
                     skill_dirs=[_skills_root() / "common", _skills_root() / "planner"],
                     tools=mcp_tools,
-                    permissions=_role_permissions(self.settings, can_write_memory=False),
+                    permissions=_role_permissions(settings, can_write_memory=False),
                 ),
                 _build_subagent_config(
                     name="critic",
@@ -101,7 +125,7 @@ class DeepAgentsRuntimeFactory:
                     system_prompt=_critic_system_prompt(),
                     skill_dirs=[_skills_root() / "common", _skills_root() / "critic"],
                     tools=mcp_tools,
-                    permissions=_role_permissions(self.settings, can_write_memory=False),
+                    permissions=_role_permissions(settings, can_write_memory=False),
                 ),
                 _build_subagent_config(
                     name="synthesizer",
@@ -109,18 +133,18 @@ class DeepAgentsRuntimeFactory:
                     system_prompt=_synthesizer_system_prompt(),
                     skill_dirs=[_skills_root() / "common", _skills_root() / "synthesizer"],
                     tools=mcp_tools,
-                    permissions=_role_permissions(self.settings, can_write_memory=False),
+                    permissions=_role_permissions(settings, can_write_memory=False),
                 ),
             ],
             skills=[str(_skills_root() / "common")],
-            memory=[str(self.settings.memory_root / "study-notes.md")],
-            permissions=_role_permissions(self.settings, can_write_memory=True),
-            backend=_build_backend(self.settings),
+            memory=[str(settings.memory_root / "study-notes.md")],
+            permissions=_role_permissions(settings, can_write_memory=True),
+            backend=_build_backend(settings),
             checkpointer=MemorySaver(),
             interrupt_on={"promote_memory": True},
             response_format=OrchestratorOutput,
         )
-        return DeepAgentsRuntime(agent=agent, settings=self.settings, auto_approve_memory=self.auto_approve_memory)
+        return DeepAgentsRuntime(agent=agent, settings=settings, auto_approve_memory=self.auto_approve_memory)
 
     async def _load_mcp_tools(self) -> list[Any]:
         client = MultiServerMCPClient(
@@ -185,7 +209,7 @@ class DeepAgentsRuntime:
 
         for chunk in self.agent.stream(
             {"messages": [{"role": "user", "content": request.message}]},
-            config={"configurable": {"thread_id": request.thread_id, "user_id": request.user_id}},
+            config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
             stream_mode=["updates", "messages"],
             subgraphs=True,
             version="v2",
@@ -243,7 +267,7 @@ class DeepAgentsRuntime:
             )
             resume_result = self.agent.invoke(
                 Command(resume={"decisions": [{"type": "approve"} for _ in interrupt_payload["action_requests"]]}),
-                config={"configurable": {"thread_id": request.thread_id, "user_id": request.user_id}},
+                config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
                 version="v2",
             )
             output = _coerce_output(resume_result.value, fallback_snapshot=final_snapshot)
@@ -263,7 +287,7 @@ class DeepAgentsRuntime:
     ) -> None:
         result = self.agent.invoke(
             {"messages": [{"role": "user", "content": request.message}]},
-            config={"configurable": {"thread_id": request.thread_id, "user_id": request.user_id}},
+            config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
             version="v2",
         )
         if getattr(result, "interrupts", ()):
@@ -285,7 +309,7 @@ class DeepAgentsRuntime:
             )
             result = self.agent.invoke(
                 Command(resume={"decisions": [{"type": "approve"} for _ in _interrupt_payload(result.interrupts)["action_requests"]]}),
-                config={"configurable": {"thread_id": request.thread_id, "user_id": request.user_id}},
+                config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
                 version="v2",
             )
 
@@ -351,7 +375,7 @@ def _build_promote_memory_tool(settings: AppSettings):
     @tool("promote_memory")
     def promote_memory(path: str, content: str, summary: str) -> str:
         """Persist a proposed memory entry under the configured memory root."""
-        target = _memory_target(settings, path)
+        target = resolve_memory_target(settings, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
             "\n".join(
@@ -372,13 +396,47 @@ def _build_promote_memory_tool(settings: AppSettings):
     return promote_memory
 
 
-def _memory_target(settings: AppSettings, path: str) -> Path:
+def resolve_runtime_scope(settings: AppSettings, request: ChatRequest) -> RuntimeScope:
+    user_id = _safe_path_component(request.user_id, field_name="user_id")
+    thread_id = _safe_path_component(request.thread_id, field_name="thread_id")
+    run_id = _safe_path_component(request.run_id, field_name="run_id")
+    return RuntimeScope(
+        user_id=user_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        blackboard_root=settings.blackboard_root / user_id / thread_id / run_id,
+        memory_root=settings.memory_root / user_id,
+    )
+
+
+def _scope_settings(settings: AppSettings, scope: RuntimeScope) -> AppSettings:
+    return AppSettings(
+        workspace_root=settings.workspace_root,
+        blackboard_root=scope.blackboard_root,
+        memory_root=scope.memory_root,
+    )
+
+
+def resolve_memory_target(settings: AppSettings, path: str) -> Path:
     candidate = Path(path)
     if candidate.is_absolute():
+        parts = candidate.parts
+        if len(parts) < 2 or parts[1] != "memories":
+            raise ValueError("promote_memory path must start with /memories/")
+        candidate = Path(*parts[2:])
+    elif candidate.parts and candidate.parts[0] == "memories":
         candidate = Path(*candidate.parts[1:])
-    if candidate.parts and candidate.parts[0] == "memories":
-        candidate = Path(*candidate.parts[1:])
-    return settings.memory_root / candidate
+
+    if not candidate.parts:
+        raise ValueError("promote_memory path must include a file name")
+
+    root = settings.memory_root.resolve()
+    target = (settings.memory_root / candidate).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("promote_memory path escapes the configured memory root") from exc
+    return target
 
 
 def _coerce_output(value: Any, *, fallback_snapshot: BlackboardSnapshot) -> OrchestratorOutput:
@@ -479,6 +537,24 @@ def _truncate(text: str, limit: int = 160) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 1] + "…"
+
+
+def _safe_path_component(value: str, *, field_name: str) -> str:
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError(f"{field_name} must be a single safe path component")
+    if Path(value).is_absolute():
+        raise ValueError(f"{field_name} must be relative")
+    return value
+
+
+def _graph_thread_id(request: ChatRequest) -> str:
+    return ":".join(
+        [
+            _safe_path_component(request.user_id, field_name="user_id"),
+            _safe_path_component(request.thread_id, field_name="thread_id"),
+            _safe_path_component(request.run_id, field_name="run_id"),
+        ]
+    )
 
 
 def _read_blackboard_artifacts(root: Path) -> dict[str, str]:
