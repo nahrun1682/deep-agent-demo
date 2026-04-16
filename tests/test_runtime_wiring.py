@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import sys
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 
 from deep_agent_demo.blackboard import AppSettings, BlackboardSnapshot, GoalDocument
 from deep_agent_demo.runtime import (
@@ -13,6 +16,11 @@ from deep_agent_demo.runtime import (
     OrchestratorOutput,
     candidate_env_files,
 )
+
+
+class ToolFriendlyFake(FakeMessagesListChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
 
 
 class _FakeInterrupt:
@@ -143,3 +151,48 @@ async def test_runtime_can_stop_on_memory_interrupt_when_auto_approve_is_disable
     assert [event.type for event in events] == ["progress", "hitl"]
     assert events[1].state == "pending"
     assert len(runtime.agent.calls) == 1
+
+
+def test_real_factory_with_fake_model_and_local_mcp_runs_end_to_end(tmp_path: Path) -> None:
+    responses = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "promote_memory",
+                    "args": {
+                        "path": "/memories/blackboard.md",
+                        "content": "keep the blackboard observable",
+                        "summary": "Blackboard stays as a projection layer",
+                    },
+                    "id": "1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        AIMessage(
+            content='{"final_answer":"done","snapshot":{"goal":{"request":"hello"}}}',
+        ),
+    ]
+    model = ToolFriendlyFake(responses=responses)
+    settings = AppSettings(
+        workspace_root=tmp_path,
+        blackboard_root=tmp_path / "blackboard",
+        memory_root=tmp_path / "memories",
+    )
+
+    runtime = DeepAgentsRuntimeFactory(settings=settings, model=model).build()
+
+    async def run() -> list[str]:
+        events = [
+            event
+            async for event in runtime.stream(ChatRequest(message="hello"))
+        ]
+        assert events[0].type == "progress"
+        assert any(event.type == "hitl" and event.state == "pending" for event in events)
+        assert any(event.type == "hitl" and event.state == "approved" for event in events)
+        assert events[-1].type == "final"
+        assert events[-1].final_answer == "done"
+        return [event.type for event in events]
+
+    assert "final" in asyncio.run(run())

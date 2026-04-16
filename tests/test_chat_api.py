@@ -172,6 +172,38 @@ async def test_chat_endpoint_streams_sse_and_writes_blackboard(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_chat_endpoint_preserves_existing_blackboard_files(tmp_path: Path) -> None:
+    blackboard_root = tmp_path / "blackboard"
+    blackboard_root.mkdir(parents=True, exist_ok=True)
+    existing_plan = blackboard_root / "plan.md"
+    existing_plan.write_text("runtime-owned plan", encoding="utf-8")
+
+    app = create_app(
+        settings_overrides={
+            "workspace_root": tmp_path,
+            "blackboard_root": blackboard_root,
+            "memory_root": tmp_path / "memories",
+        },
+        runtime=FakeRuntime(_sample_snapshot()),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/chat",
+            json={
+                "message": "Study the blackboard pattern",
+                "auto_approve_memory": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert existing_plan.read_text(encoding="utf-8") == "runtime-owned plan"
+
+
+@pytest.mark.asyncio
 async def test_health_endpoint_reports_ready() -> None:
     app = create_app(
         settings_overrides={
