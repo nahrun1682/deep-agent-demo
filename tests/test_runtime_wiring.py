@@ -124,7 +124,9 @@ def test_promote_memory_target_rejects_path_traversal(tmp_path: Path) -> None:
     )
 
     assert resolve_memory_target(settings, "/memories/study.md") == tmp_path / "memories" / "study.md"
+    assert resolve_memory_target(settings, "/memory/study.md") == tmp_path / "memories" / "study.md"
     assert resolve_memory_target(settings, "memories/nested/note.md") == tmp_path / "memories" / "nested" / "note.md"
+    assert resolve_memory_target(settings, "memory/nested/note.md") == tmp_path / "memories" / "nested" / "note.md"
 
     with pytest.raises(ValueError):
         resolve_memory_target(settings, "../escape.md")

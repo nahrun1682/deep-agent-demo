@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import queue
 import sys
-import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,56 +177,17 @@ class DeepAgentsRuntime:
                 raise RuntimeError("DeepAgentsRuntime requires an agent or an agent_factory")
             agent = await self.agent_factory(request)
         scope = resolve_runtime_scope(self.settings, request)
-        events: "queue.Queue[RuntimeEvent | Exception | object]" = queue.Queue()
-        sentinel = object()
-        worker = threading.Thread(
-            target=self._run_stream,
-            args=(request, scope, agent, events, sentinel),
-            daemon=True,
-        )
-        worker.start()
-
-        while True:
-            item = await asyncio.to_thread(events.get)
-            if item is sentinel:
-                break
-            if isinstance(item, Exception):
-                raise item
-            yield item
-
-    def _run_stream(
-        self,
-        request: ChatRequest,
-        scope: RuntimeScope,
-        agent: Any,
-        events: "queue.Queue[RuntimeEvent | Exception | object]",
-        sentinel: object,
-    ) -> None:
-        try:
-            self._emit_stream_events(request, scope, agent, events)
-        except Exception as exc:  # pragma: no cover - surfaced in async consumer
-            events.put(exc)
-        finally:
-            events.put(sentinel)
-
-    def _emit_stream_events(
-        self,
-        request: ChatRequest,
-        scope: RuntimeScope,
-        agent: Any,
-        events: "queue.Queue[RuntimeEvent | Exception | object]",
-    ) -> None:
-        events.put(RuntimeEvent.progress(actor="Orchestrator", message="Starting deep agent run", step="start"))
+        yield RuntimeEvent.progress(actor="Orchestrator", message="Starting deep agent run", step="start")
         base_snapshot = _seed_snapshot(request)
-        final_snapshot = base_snapshot
         last_ai_content = ""
         interrupt_payload: dict[str, Any] | None = None
 
-        if not hasattr(agent, "stream"):
-            self._emit_legacy_events(agent, request, scope, events, base_snapshot)
+        if not hasattr(agent, "astream"):
+            async for event in self._emit_legacy_events(agent, request, scope, base_snapshot):
+                yield event
             return
 
-        for chunk in agent.stream(
+        async for chunk in agent.astream(
             {"messages": [{"role": "user", "content": request.message}]},
             config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
             stream_mode=["updates", "messages"],
@@ -239,96 +198,83 @@ class DeepAgentsRuntime:
                 updates = chunk["data"]
                 if "__interrupt__" in updates:
                     interrupt_payload = _interrupt_payload(updates["__interrupt__"])
-                    events.put(
-                        RuntimeEvent.hitl(
-                            action="promote_memory",
-                            state="pending",
-                            message="Memory write needs approval",
-                        )
+                    yield RuntimeEvent.hitl(
+                        action="promote_memory",
+                        state="pending",
+                        message="Memory write needs approval",
                     )
                     break
-                events.put(
-                    RuntimeEvent.progress(
-                        actor=_chunk_actor(chunk["ns"], None),
-                        message=_summarize_updates(updates),
-                        step=_step_name(updates),
-                    )
+                yield RuntimeEvent.progress(
+                    actor=_chunk_actor(chunk["ns"], None),
+                    message=_summarize_updates(updates),
+                    step=_step_name(updates),
                 )
-                events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
+                yield RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(scope.blackboard_root))
                 continue
 
             token, metadata = chunk["data"]
             actor = _chunk_actor(chunk["ns"], metadata)
             if getattr(token, "tool_calls", None):
                 tool_names = ", ".join(call.get("name", "tool") for call in token.tool_calls)
-                events.put(RuntimeEvent.progress(actor=actor, message=f"Requested tools: {tool_names}", step="tool_calls"))
+                yield RuntimeEvent.progress(actor=actor, message=f"Requested tools: {tool_names}", step="tool_calls")
             elif getattr(token, "type", None) == "tool":
-                events.put(
-                    RuntimeEvent.progress(
-                        actor=actor,
-                        message=f"Tool result [{getattr(token, 'name', 'tool')}]: {_truncate(getattr(token, 'content', ''))}",
-                        step="tool_result",
-                    )
+                yield RuntimeEvent.progress(
+                    actor=actor,
+                    message=f"Tool result [{getattr(token, 'name', 'tool')}]: {_truncate(getattr(token, 'content', ''))}",
+                    step="tool_result",
                 )
                 if getattr(token, "name", "") in {"write_file", "edit_file", "promote_memory"}:
-                    events.put(RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
+                    yield RuntimeEvent.blackboard(artifacts=_read_blackboard_artifacts(scope.blackboard_root))
             elif getattr(token, "type", None) == "ai" and getattr(token, "content", ""):
                 last_ai_content = token.content
-                events.put(RuntimeEvent.progress(actor=actor, message=_truncate(token.content), step="message"))
+                yield RuntimeEvent.progress(actor=actor, message=_truncate(token.content), step="message")
 
         if interrupt_payload is not None:
             if not request.auto_approve_memory or not self.auto_approve_memory:
                 return
-            events.put(
-                RuntimeEvent.hitl(
-                    action="promote_memory",
-                    state="approved",
-                    message="Memory write auto-approved",
-                )
+            yield RuntimeEvent.hitl(
+                action="promote_memory",
+                state="approved",
+                message="Memory write auto-approved",
             )
-            resume_result = agent.invoke(
+            resume_result = await agent.ainvoke(
                 Command(resume={"decisions": [{"type": "approve"} for _ in interrupt_payload["action_requests"]]}),
                 config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
                 version="v2",
             )
-            output = _coerce_output(resume_result.value, fallback_snapshot=final_snapshot)
-            events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
-            events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
+            output = _coerce_output(resume_result.value, fallback_snapshot=base_snapshot)
+            yield RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root))
+            yield RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot)
             return
 
         output = _coerce_output_from_text(last_ai_content, fallback_snapshot=base_snapshot)
-        events.put(RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root)))
-        events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
+        yield RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root))
+        yield RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot)
 
-    def _emit_legacy_events(
+    async def _emit_legacy_events(
         self,
         agent: Any,
         request: ChatRequest,
         scope: RuntimeScope,
-        events: "queue.Queue[RuntimeEvent | Exception | object]",
         base_snapshot: BlackboardSnapshot,
-    ) -> None:
+    ) -> AsyncIterator[RuntimeEvent]:
         result = agent.invoke(
             {"messages": [{"role": "user", "content": request.message}]},
             config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
             version="v2",
         )
         if getattr(result, "interrupts", ()):
-            events.put(
-                RuntimeEvent.hitl(
-                    action="promote_memory",
-                    state="pending",
-                    message="Memory write needs approval",
-                )
+            yield RuntimeEvent.hitl(
+                action="promote_memory",
+                state="pending",
+                message="Memory write needs approval",
             )
             if not request.auto_approve_memory or not self.auto_approve_memory:
                 return
-            events.put(
-                RuntimeEvent.hitl(
-                    action="promote_memory",
-                    state="approved",
-                    message="Memory write auto-approved",
-                )
+            yield RuntimeEvent.hitl(
+                action="promote_memory",
+                state="approved",
+                message="Memory write auto-approved",
             )
             result = agent.invoke(
                 Command(resume={"decisions": [{"type": "approve"} for _ in _interrupt_payload(result.interrupts)["action_requests"]]}),
@@ -337,8 +283,8 @@ class DeepAgentsRuntime:
             )
 
         output = _coerce_output(result.value, fallback_snapshot=base_snapshot)
-        events.put(RuntimeEvent.blackboard(snapshot=output.snapshot))
-        events.put(RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot))
+        yield RuntimeEvent.blackboard(snapshot=output.snapshot)
+        yield RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot)
 
 
 def _build_subagent_config(
@@ -444,10 +390,10 @@ def resolve_memory_target(settings: AppSettings, path: str) -> Path:
     candidate = Path(path)
     if candidate.is_absolute():
         parts = candidate.parts
-        if len(parts) < 2 or parts[1] != "memories":
-            raise ValueError("promote_memory path must start with /memories/")
+        if len(parts) < 2 or parts[1] not in {"memories", "memory"}:
+            raise ValueError("promote_memory path must start with /memories/ or /memory/")
         candidate = Path(*parts[2:])
-    elif candidate.parts and candidate.parts[0] == "memories":
+    elif candidate.parts and candidate.parts[0] in {"memories", "memory"}:
         candidate = Path(*candidate.parts[1:])
 
     if not candidate.parts:
