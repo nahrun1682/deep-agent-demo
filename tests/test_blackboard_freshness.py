@@ -84,6 +84,6 @@ async def test_chat_refreshes_blackboard_and_emits_current_artifacts(tmp_path: P
     assert "stale plan" not in response.text
     assert "runtime plan" in response.text
     assert "runtime trace" in response.text
-    assert (scoped_root / "plan.md").read_text(encoding="utf-8") == "runtime plan"
+    assert "runtime plan" in (scoped_root / "plan.md").read_text(encoding="utf-8")
     assert (scoped_root / "trace.md").read_text(encoding="utf-8") == "runtime trace"
     assert (scoped_root / "goal.md").read_text(encoding="utf-8") != "stale goal"

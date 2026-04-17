@@ -26,7 +26,7 @@ def test_real_openai_backed_runtime_path_with_local_mcp(tmp_path: Path) -> None:
         memory_root=tmp_path / "memories",
     )
     request = ChatRequest(
-        message="Give a one-sentence summary of the blackboard pattern.",
+        message="黒板パターンを使って OSS 公開計画を立てて",
         auto_approve_memory=True,
         thread_id="real-thread",
         run_id="real-run",
@@ -50,4 +50,9 @@ def test_real_openai_backed_runtime_path_with_local_mcp(tmp_path: Path) -> None:
     assert event_names[0] == "progress"
     assert "blackboard" in event_names
     assert event_names[-1] == "final"
-    assert resolve_runtime_scope(app.state.settings, request).blackboard_root.joinpath("goal.md").exists()
+    blackboard_root = resolve_runtime_scope(app.state.settings, request).blackboard_root
+    assert blackboard_root.joinpath("goal.md").exists()
+    assert "No plan has been recorded yet." not in blackboard_root.joinpath("plan.md").read_text(encoding="utf-8")
+    assert "No critique has been recorded yet." not in blackboard_root.joinpath("critique.md").read_text(encoding="utf-8")
+    assert "No synthesis has been recorded yet." not in blackboard_root.joinpath("synthesis.md").read_text(encoding="utf-8")
+    assert "No trace entries recorded yet." not in blackboard_root.joinpath("trace.md").read_text(encoding="utf-8")

@@ -32,7 +32,7 @@ class ScopedWritingRuntime:
             snapshot=BlackboardSnapshot(
                 goal=GoalDocument(request=request.message),
                 plan=PlanDocument(
-                    overview="isolated run",
+                    overview=f"isolated run for {request.run_id}",
                     steps=[PlanStep(order=1, title="write plan", detail="write scoped files")],
                 ),
                 state_summary=StateSummary(
@@ -87,6 +87,5 @@ async def test_chat_uses_distinct_blackboard_roots_for_distinct_runs(tmp_path: P
     scope_2 = resolve_runtime_scope(app.state.settings, ChatRequest(**body_2))
 
     assert scope_1.blackboard_root != scope_2.blackboard_root
-    assert (scope_1.blackboard_root / "plan.md").read_text(encoding="utf-8") == "plan for shared-thread:run-1"
-    assert (scope_2.blackboard_root / "plan.md").read_text(encoding="utf-8") == "plan for shared-thread:run-2"
-
+    assert "isolated run for run-1" in (scope_1.blackboard_root / "plan.md").read_text(encoding="utf-8")
+    assert "isolated run for run-2" in (scope_2.blackboard_root / "plan.md").read_text(encoding="utf-8")

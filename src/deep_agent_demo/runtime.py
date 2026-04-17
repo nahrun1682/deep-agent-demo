@@ -243,11 +243,18 @@ class DeepAgentsRuntime:
                 version="v2",
             )
             output = _coerce_output(resume_result.value, fallback_snapshot=base_snapshot)
+            output = await self._repair_incomplete_output(agent, request, output)
             yield RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root))
             yield RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot)
             return
 
-        output = _coerce_output_from_text(last_ai_content, fallback_snapshot=base_snapshot)
+        output = await _resolve_stream_output(
+            agent,
+            request,
+            fallback_snapshot=base_snapshot,
+            last_ai_content=last_ai_content,
+        )
+        output = await self._repair_incomplete_output(agent, request, output)
         yield RuntimeEvent.blackboard(snapshot=output.snapshot, artifacts=_read_blackboard_artifacts(scope.blackboard_root))
         yield RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot)
 
@@ -283,8 +290,37 @@ class DeepAgentsRuntime:
             )
 
         output = _coerce_output(result.value, fallback_snapshot=base_snapshot)
+        output = await self._repair_incomplete_output(agent, request, output)
         yield RuntimeEvent.blackboard(snapshot=output.snapshot)
         yield RuntimeEvent.final(final_answer=output.final_answer, snapshot=output.snapshot)
+
+    async def _repair_incomplete_output(
+        self,
+        agent: Any,
+        request: ChatRequest,
+        output: OrchestratorOutput,
+    ) -> OrchestratorOutput:
+        gaps = _snapshot_gaps(output.snapshot)
+        if not gaps or not hasattr(agent, "ainvoke"):
+            return output
+
+        repair_result = await agent.ainvoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": _repair_prompt(gaps),
+                    }
+                ]
+            },
+            config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
+            version="v2",
+        )
+        repair_value = getattr(repair_result, "value", repair_result)
+        repaired = _coerce_output(repair_value, fallback_snapshot=output.snapshot)
+        if _snapshot_gaps(repaired.snapshot):
+            return output
+        return repaired
 
 
 def _build_subagent_config(
@@ -426,6 +462,14 @@ def _coerce_output(value: Any, *, fallback_snapshot: BlackboardSnapshot) -> Orch
 
 
 def _output_from_state_dict(value: dict[str, Any], *, fallback_snapshot: BlackboardSnapshot) -> OrchestratorOutput | None:
+    for key in ("structured_response", "structured_output", "output", "response"):
+        structured = value.get(key)
+        if structured is None:
+            continue
+        try:
+            return _coerce_output(structured, fallback_snapshot=fallback_snapshot)
+        except (TypeError, ValueError):
+            pass
     messages = value.get("messages")
     if not isinstance(messages, list):
         return None
@@ -449,6 +493,37 @@ def _coerce_output_from_text(text: str, *, fallback_snapshot: BlackboardSnapshot
     except json.JSONDecodeError:
         return OrchestratorOutput(final_answer=text.strip(), snapshot=fallback_snapshot)
     return _coerce_output(data, fallback_snapshot=fallback_snapshot)
+
+
+async def _resolve_stream_output(
+    agent: Any,
+    request: ChatRequest,
+    *,
+    fallback_snapshot: BlackboardSnapshot,
+    last_ai_content: str,
+) -> OrchestratorOutput:
+    state_output = await _output_from_graph_state(agent, request, fallback_snapshot=fallback_snapshot)
+    if state_output is not None:
+        return state_output
+    return _coerce_output_from_text(last_ai_content, fallback_snapshot=fallback_snapshot)
+
+
+async def _output_from_graph_state(
+    agent: Any,
+    request: ChatRequest,
+    *,
+    fallback_snapshot: BlackboardSnapshot,
+) -> OrchestratorOutput | None:
+    if not hasattr(agent, "aget_state"):
+        return None
+    state = await agent.aget_state(
+        config={"configurable": {"thread_id": _graph_thread_id(request), "user_id": request.user_id}},
+        subgraphs=True,
+    )
+    values = getattr(state, "values", state)
+    if not isinstance(values, dict):
+        return None
+    return _output_from_state_dict(values, fallback_snapshot=fallback_snapshot)
 
 
 def _interrupt_payload(interrupts: Any) -> dict[str, Any]:
@@ -544,6 +619,30 @@ def _read_blackboard_artifacts(root: Path) -> dict[str, str]:
         if path.exists():
             artifacts[relative_path] = path.read_text(encoding="utf-8")
     return artifacts
+
+
+def _snapshot_gaps(snapshot: BlackboardSnapshot) -> list[str]:
+    gaps: list[str] = []
+    if snapshot.plan is None:
+        gaps.append("plan")
+    if snapshot.critique is None:
+        gaps.append("critique")
+    if snapshot.synthesis is None:
+        gaps.append("synthesis")
+    if not snapshot.trace:
+        gaps.append("trace")
+    if snapshot.state_summary is None:
+        gaps.append("state_summary")
+    return gaps
+
+
+def _repair_prompt(gaps: list[str]) -> str:
+    return (
+        "The blackboard snapshot is incomplete. "
+        f"Fill these missing sections: {', '.join(gaps)}. "
+        "Read the existing blackboard state, use Planner, Critic, and Synthesizer as needed, "
+        "and return a complete OrchestratorOutput. Preserve sections that are already filled."
+    )
 
 
 def _orchestrator_system_prompt() -> str:

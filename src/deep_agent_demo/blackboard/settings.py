@@ -15,8 +15,13 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _derive_paths(self) -> "AppSettings":
+        self.workspace_root = self.workspace_root.resolve()
         if self.blackboard_root is None:
             self.blackboard_root = self.workspace_root / "blackboard"
+        else:
+            self.blackboard_root = self.blackboard_root.resolve()
         if self.memory_root is None:
             self.memory_root = self.workspace_root / "memories"
+        else:
+            self.memory_root = self.memory_root.resolve()
         return self

@@ -9,6 +9,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage
 
 from deep_agent_demo.blackboard import AppSettings, BlackboardSnapshot, GoalDocument
+from deep_agent_demo.blackboard import StateSummary
 from deep_agent_demo.runtime import (
     ChatRequest,
     DeepAgentsRuntime,
@@ -51,6 +52,77 @@ class _FakeAgent:
                 snapshot=BlackboardSnapshot(goal=GoalDocument(request="hello")),
             ),
             interrupts=(),
+        )
+
+
+class _FakeStateSnapshot:
+    def __init__(self, values):
+        self.values = values
+
+
+class _AsyncStateAgent:
+    async def astream(self, input, config=None, stream_mode=None, subgraphs=None, version=None):
+        if False:
+            yield None
+
+    async def aget_state(self, config=None, subgraphs=None):
+        return _FakeStateSnapshot(
+            {
+                "structured_response": {
+                    "final_answer": "done",
+                    "snapshot": {
+                        "goal": {"request": "hello"},
+                        "plan": {
+                            "overview": "Build the plan from structured state.",
+                            "steps": [
+                                {"order": 1, "title": "plan", "detail": "use graph state"},
+                            ],
+                        },
+                    },
+                }
+            }
+        )
+
+
+class _AsyncRepairAgent:
+    def __init__(self) -> None:
+        self.repair_calls: list[object] = []
+
+    async def astream(self, input, config=None, stream_mode=None, subgraphs=None, version=None):
+        if False:
+            yield None
+
+    async def aget_state(self, config=None, subgraphs=None):
+        return _FakeStateSnapshot(
+            {
+                "structured_response": {
+                    "final_answer": "draft",
+                    "snapshot": {
+                        "goal": {"request": "hello"},
+                        "plan": {"overview": "Initial plan"},
+                    },
+                }
+            }
+        )
+
+    async def ainvoke(self, input, config=None, version=None):
+        self.repair_calls.append(input)
+        return _FakeGraphOutput(
+            value=OrchestratorOutput(
+                final_answer="done",
+                snapshot=BlackboardSnapshot(
+                    goal=GoalDocument(request="hello"),
+                    plan={"overview": "Initial plan"},
+                    critique={"risks": ["missing review"], "improvements": ["add critic pass"]},
+                    synthesis={"recommended_direction": "Use planner, critic, and synthesizer"},
+                    trace=[{"actor": "Orchestrator", "action": "repair", "result": "completed missing sections"}],
+                    state_summary=StateSummary(
+                        headline="complete",
+                        status="done",
+                        current_focus="none",
+                    ),
+                ),
+            )
         )
 
 
@@ -142,6 +214,16 @@ def test_candidate_env_files_include_repo_and_codex_envs() -> None:
     assert Path.cwd() / ".codex" / ".env" in files
 
 
+def test_app_settings_normalizes_relative_paths_to_absolute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    settings = AppSettings(workspace_root=Path("relative-workspace"))
+
+    assert settings.workspace_root.is_absolute()
+    assert settings.blackboard_root is not None and settings.blackboard_root.is_absolute()
+    assert settings.memory_root is not None and settings.memory_root.is_absolute()
+
+
 @pytest.mark.asyncio
 async def test_runtime_auto_approves_memory_interrupts() -> None:
     runtime = DeepAgentsRuntime(
@@ -184,6 +266,50 @@ async def test_runtime_can_stop_on_memory_interrupt_when_auto_approve_is_disable
     assert [event.type for event in events] == ["progress", "hitl"]
     assert events[1].state == "pending"
     assert len(runtime.agent.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_graph_state_structured_response_after_async_stream() -> None:
+    runtime = DeepAgentsRuntime(
+        agent=_AsyncStateAgent(),
+        settings=AppSettings(
+            workspace_root=Path("/tmp/study-demo"),
+            blackboard_root=Path("/tmp/study-demo/blackboard"),
+            memory_root=Path("/tmp/study-demo/memories"),
+        ),
+        auto_approve_memory=True,
+    )
+
+    events = [event async for event in runtime.stream(ChatRequest(message="hello"))]
+
+    assert events[-1].type == "final"
+    assert events[-1].final_answer == "done"
+    assert events[-1].snapshot is not None
+    assert events[-1].snapshot.plan is not None
+    assert events[-1].snapshot.plan.overview == "Build the plan from structured state."
+
+
+@pytest.mark.asyncio
+async def test_runtime_repairs_missing_blackboard_sections_after_stream() -> None:
+    agent = _AsyncRepairAgent()
+    runtime = DeepAgentsRuntime(
+        agent=agent,
+        settings=AppSettings(
+            workspace_root=Path("/tmp/study-demo"),
+            blackboard_root=Path("/tmp/study-demo/blackboard"),
+            memory_root=Path("/tmp/study-demo/memories"),
+        ),
+        auto_approve_memory=True,
+    )
+
+    events = [event async for event in runtime.stream(ChatRequest(message="hello"))]
+
+    assert events[-1].type == "final"
+    assert events[-1].snapshot is not None
+    assert events[-1].snapshot.critique is not None
+    assert events[-1].snapshot.synthesis is not None
+    assert events[-1].snapshot.trace
+    assert len(agent.repair_calls) == 1
 
 
 def test_real_factory_with_fake_model_and_local_mcp_runs_end_to_end(tmp_path: Path) -> None:

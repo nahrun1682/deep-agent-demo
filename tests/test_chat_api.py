@@ -54,6 +54,16 @@ class FakeRuntime:
         )
 
 
+class FailingRuntime:
+    async def stream(self, request: ChatRequest):
+        yield RuntimeEvent.progress(
+            actor="Orchestrator",
+            message="Started",
+            step="start",
+        )
+        raise RuntimeError("upstream runtime failure")
+
+
 def _sample_snapshot() -> BlackboardSnapshot:
     return BlackboardSnapshot(
         goal=GoalDocument(
@@ -170,6 +180,9 @@ async def test_chat_endpoint_streams_sse_and_writes_blackboard(tmp_path: Path) -
     }
     assert expected_files.issubset({item.name for item in blackboard_root.iterdir()})
     assert "Study the blackboard pattern" in (blackboard_root / "goal.md").read_text()
+    assert "Break the task into planner, critic, and synthesizer work." in (blackboard_root / "plan.md").read_text()
+    assert "Use structured outputs and project them to markdown." in (blackboard_root / "synthesis.md").read_text()
+    assert "Use structured outputs as canonical data." in (blackboard_root / "decisions.md").read_text()
     assert "Planner started" in response.text
 
 
@@ -211,7 +224,7 @@ async def test_chat_endpoint_resets_existing_blackboard_files(tmp_path: Path) ->
 
     assert response.status_code == 200
     assert existing_plan.read_text(encoding="utf-8") != "runtime-owned plan"
-    assert "No plan has been recorded yet." in existing_plan.read_text(encoding="utf-8")
+    assert "Break the task into planner, critic, and synthesizer work." in existing_plan.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -232,6 +245,37 @@ async def test_health_endpoint_reports_ready() -> None:
         response = await client.get("/health")
 
     assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_chat_endpoint_emits_error_event_when_runtime_fails(tmp_path: Path) -> None:
+    app = create_app(
+        settings_overrides={
+            "workspace_root": tmp_path,
+            "blackboard_root": tmp_path / "blackboard",
+            "memory_root": tmp_path / "memories",
+        },
+        runtime=FailingRuntime(),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/chat",
+            json={
+                "message": "Study the blackboard pattern",
+                "auto_approve_memory": True,
+                "thread_id": "thread-error",
+                "run_id": "run-error",
+                "user_id": "local-user",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    assert "upstream runtime failure" in response.text
 
 
 def test_create_app_loads_dotenv_before_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -256,6 +300,6 @@ def test_create_app_loads_dotenv_before_settings(monkeypatch: pytest.MonkeyPatch
         runtime=FakeRuntime(_sample_snapshot()),
     )
 
-    assert app.state.settings.workspace_root == Path("/tmp/env-workspace")
-    assert app.state.settings.blackboard_root == Path("/tmp/env-workspace/blackboard")
-    assert app.state.settings.memory_root == Path("/tmp/env-workspace/memories")
+    assert app.state.settings.workspace_root == Path("/tmp/env-workspace").resolve()
+    assert app.state.settings.blackboard_root == Path("/tmp/env-workspace/blackboard").resolve()
+    assert app.state.settings.memory_root == Path("/tmp/env-workspace/memories").resolve()

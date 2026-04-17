@@ -39,6 +39,104 @@ Deep Agents が最初から持っている planning、filesystem、subagents、m
 
 ---
 
+## 使い方
+
+### 1. セットアップ
+
+```bash
+uv sync
+```
+
+`.env` に `OPENAI_API_KEY` を置く。
+
+必要なら blackboard や memory の保存先は環境変数で変えられる。
+
+```bash
+DEEP_AGENT_DEMO_WORKSPACE_ROOT=/tmp/deep-agent-demo
+DEEP_AGENT_DEMO_BLACKBOARD_ROOT=/tmp/deep-agent-demo/blackboard
+DEEP_AGENT_DEMO_MEMORY_ROOT=/tmp/deep-agent-demo/memories
+```
+
+### 2. サーバー起動
+
+```bash
+uv run deep-agent-demo
+```
+
+起動後は `http://127.0.0.1:8000` で待ち受ける。
+
+ヘルスチェック:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+### 3. `/chat` を叩く
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "黒板パターンを使って OSS 公開計画を立てて",
+    "user_id": "demo-user",
+    "thread_id": "demo-thread",
+    "run_id": "run-001",
+    "auto_approve_memory": true
+  }'
+```
+
+SSE では少なくとも次のイベントが流れる。
+
+- `progress`
+- `blackboard`
+- `hitl`
+- `final`
+
+### 4. 生成物を見る
+
+blackboard は run 単位で分かれる。
+
+```text
+blackboard/<user_id>/<thread_id>/<run_id>/
+```
+
+この中に次のファイルが出る。
+
+- `goal.md`
+- `plan.md`
+- `critique.md`
+- `synthesis.md`
+- `trace.md`
+- `memory-proposals.md`
+- `mcp-log.md`
+- `state-summary.md`
+- `decisions.md`
+- `open-questions.md`
+
+memory は user 単位で分かれる。
+
+```text
+memories/<user_id>/
+```
+
+### 5. テスト
+
+通常テスト:
+
+```bash
+uv run pytest -q
+```
+
+real OpenAI-backed E2E:
+
+```bash
+DEEP_AGENT_DEMO_RUN_REAL_E2E=1 uv run pytest -q tests/test_real_runtime_path.py
+```
+
+この E2E は local MCP server と `/chat` の SSE 経路を通す。
+
+---
+
 ## 設計の前提
 
 この README では、次の前提を採る。

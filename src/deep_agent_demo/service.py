@@ -35,6 +35,18 @@ class BlackboardProjector:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(plan.content, encoding="utf-8")
 
+    def project_snapshot(self, root: Path, snapshot: BlackboardSnapshot) -> None:
+        self.write_artifacts(root, _populated_artifacts(snapshot))
+
+    def write_artifacts(self, root: Path, artifacts: dict[str, str]) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        for relative_path, content in artifacts.items():
+            path = root / relative_path
+            exists = path.exists()
+            plan = self.planner.plan(path, content, exists=exists)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(plan.content, encoding="utf-8")
+
 
 class ChatService:
     def __init__(self, settings: AppSettings, runtime: RuntimeProtocol) -> None:
@@ -63,8 +75,21 @@ class ChatService:
         )
         yield _sse_event("blackboard", {"artifacts": self._read_artifacts(scope.blackboard_root)})
 
-        async for event in self._runtime.stream(request):
-            yield _sse_event(event.type, event.model_dump(mode="json"))
+        try:
+            async for event in self._runtime.stream(request):
+                if event.snapshot is not None:
+                    self._projector.project_snapshot(scope.blackboard_root, event.snapshot)
+                elif event.artifacts:
+                    self._projector.write_artifacts(scope.blackboard_root, event.artifacts)
+                yield _sse_event(event.type, event.model_dump(mode="json"))
+        except Exception as exc:
+            yield _sse_event(
+                "error",
+                {
+                    "message": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     def _read_artifacts(self, root: Path) -> dict[str, str]:
         artifacts: dict[str, str] = {}
@@ -77,3 +102,29 @@ class ChatService:
 
 def _sse_event(name: str, payload: dict[str, object]) -> str:
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _populated_artifacts(snapshot: BlackboardSnapshot) -> dict[str, str]:
+    rendered = render_blackboard_artifacts(snapshot)
+    artifacts: dict[str, str] = {}
+    if snapshot.goal is not None:
+        artifacts["goal.md"] = rendered["goal.md"]
+    if snapshot.plan is not None:
+        artifacts["plan.md"] = rendered["plan.md"]
+    if snapshot.critique is not None:
+        artifacts["critique.md"] = rendered["critique.md"]
+    if snapshot.synthesis is not None:
+        artifacts["synthesis.md"] = rendered["synthesis.md"]
+    if snapshot.trace:
+        artifacts["trace.md"] = rendered["trace.md"]
+    if snapshot.memory_proposals:
+        artifacts["memory-proposals.md"] = rendered["memory-proposals.md"]
+    if snapshot.mcp_usage:
+        artifacts["mcp-log.md"] = rendered["mcp-log.md"]
+    if snapshot.state_summary is not None:
+        artifacts["state-summary.md"] = rendered["state-summary.md"]
+    if snapshot.decisions:
+        artifacts["decisions.md"] = rendered["decisions.md"]
+    if snapshot.open_questions:
+        artifacts["open-questions.md"] = rendered["open-questions.md"]
+    return artifacts
